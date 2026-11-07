@@ -1,0 +1,22 @@
+{
+	"schemaVersion": 1,
+	"id": "seedcracker",
+	"version": "${version}",
+	"name": "Seed Cracker",
+	"description": "Recovers the world seed from structures you visit and the hashed seed the server sends.",
+	"authors": ["Akshay"],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["seedcracker.SeedCrackerClient"]
+	},
+	"mixins": [
+		{ "config": "seedcracker.client.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.20.0",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

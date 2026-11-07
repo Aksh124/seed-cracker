@@ -1,0 +1,11 @@
+{
+	"required": true,
+	"package": "seedcracker.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"BiomeManagerAccess"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
