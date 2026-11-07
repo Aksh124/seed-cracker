@@ -53,7 +53,7 @@ public class SeedCrackerGameTest implements FabricClientGameTest {
 
 			List<Observation> targets = world.getServer().computeOnServer(SeedCrackerGameTest::findStructures);
 			log("visiting " + targets);
-			check(targets.size() >= SeedSolver.MIN_OBSERVATIONS, "only found " + targets.size() + " structures near spawn");
+			check(SeedSolver.information(targets).isEnough(), "only found " + targets.size() + " structures near spawn");
 
 			for (Observation target : targets) {
 				int x = target.chunkX() * 16 + 8;
@@ -84,7 +84,7 @@ public class SeedCrackerGameTest implements FabricClientGameTest {
 		int[][] centres = {{0, 0}, {3000, 0}, {0, 3000}, {-3000, 0}, {0, -3000}, {3000, 3000}, {-3000, -3000}, {3000, -3000}, {-3000, 3000}};
 
 		for (int[] centre : centres) {
-			for (StructureType type : StructureType.values()) {
+			for (StructureType type : KEYS.keySet()) {
 				Holder<Structure> holder = structures.getOrThrow(KEYS.get(type));
 				Pair<BlockPos, Holder<Structure>> result = level.getChunkSource().getGenerator()
 					.findNearestMapStructure(level, HolderSet.direct(holder), new BlockPos(centre[0], 64, centre[1]), 60, false);

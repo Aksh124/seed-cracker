@@ -13,8 +13,11 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -60,7 +63,7 @@ public final class SeedCrackerClient implements ClientModInitializer {
 			if (level.dimension() != Level.OVERWORLD) {
 				return;
 			}
-			for (Observation observation : StructureDetector.scan(chunk)) {
+			for (Observation observation : StructureDetector.scan(level, chunk)) {
 				addObservation(observation);
 			}
 		});
@@ -84,15 +87,25 @@ public final class SeedCrackerClient implements ClientModInitializer {
 		if (foundSeed != null || !OBSERVATIONS.add(observation)) {
 			return;
 		}
-		int count = OBSERVATIONS.size();
-		String progress = count < SeedSolver.MIN_OBSERVATIONS
-			? String.format("%d/%d needed", count, SeedSolver.MIN_OBSERVATIONS)
-			: count + " found";
-		message(Component.literal(String.format("Found a %s at chunk %d, %d (%s)",
-			observation.type().displayName, observation.chunkX(), observation.chunkZ(), progress)));
-		if (count >= SeedSolver.MIN_OBSERVATIONS) {
+		message(Component.literal(String.format("Found %s at chunk %d, %d (%s)",
+			withArticle(observation.type().displayName), observation.chunkX(), observation.chunkZ(), progress())));
+		if (information().isEnough()) {
 			startSolving();
 		}
+	}
+
+	private static SeedSolver.Information information() {
+		return SeedSolver.information(new ArrayList<>(OBSERVATIONS));
+	}
+
+	private static String progress() {
+		SeedSolver.Information info = information();
+		return String.format(Locale.ROOT, "%.1f/%.0f bits, %d/%d low bits",
+			info.bits(), SeedSolver.BITS_NEEDED, info.lowBits(), SeedSolver.LOW_BITS_NEEDED);
+	}
+
+	private static String withArticle(String name) {
+		return (name.startsWith("i") ? "an " : "a ") + name;
 	}
 
 	private static void startSolving() {
@@ -108,7 +121,7 @@ public final class SeedCrackerClient implements ClientModInitializer {
 		solveAgain = false;
 		List<Observation> snapshot = new ArrayList<>(OBSERVATIONS);
 		long hashedSeed = ((BiomeManagerAccess) mc.level.getBiomeManager()).seedcracker$hashedSeed();
-		message(Component.literal("Cracking with " + snapshot.size() + " structures..."));
+		message(Component.literal("Cracking with " + snapshot.size() + " structures (" + progress() + ")..."));
 
 		SOLVER.execute(() -> {
 			long started = System.nanoTime();
@@ -153,7 +166,7 @@ public final class SeedCrackerClient implements ClientModInitializer {
 		} else if (result.structureSeeds().length == 0) {
 			message(Component.literal("No seed fits these structures. One may be player-built: check /seedcrack and remove it.")
 				.withStyle(ChatFormatting.RED));
-		} else if (count >= SeedSolver.MIN_OBSERVATIONS && result.structureSeeds().length > 200_000) {
+		} else if (result.structureSeeds().length > 200_000) {
 			message(Component.literal("Too many possibilities to check yet. Visit another structure."));
 		} else {
 			message(Component.literal(String.format(
@@ -168,14 +181,72 @@ public final class SeedCrackerClient implements ClientModInitializer {
 	}
 
 	private static void registerCommands(CommandDispatcher<FabricClientCommandSource> dispatcher) {
-		dispatcher.register(literal("seedcrack")
+		// Same commands under both names.
+		for (String name : List.of("seedcrack", "seedcracker")) {
+			dispatcher.register(commandTree(name));
+		}
+	}
+
+	private static void sendInfo(FabricClientCommandSource source) {
+		String[] lines = {
+			"How Seed Cracker finds the seed:",
+			"A world seed is 64 bits. Structures only use the lower 48 (the structure seed). The top 16 come from the hashed seed the server sends.",
+			"Spread structures (desert pyramid, jungle temple, swamp hut, igloo): one per 32x32-chunk region, moved by nextInt(24) on each axis."
+				+ " Each one is 2 x log2(24) = 9.2 bits, and 6 of those fall on the lowest 20 bits.",
+			"Buried treasure: every chunk has a 1% chance, so each chest is log2(100) = 6.6 bits, none on the lowest 20."
+				+ " Chests are read from chunk data, so there's no need to dig them up.",
+			String.format(Locale.ROOT, "Step 1 tries all 2^20 values of the lowest 20 bits and needs %d low bits (3 spread structures)."
+				+ " Step 2 tries 2^28 values for the rest and needs about %.0f bits in total (5 structures, or 3 plus 3 treasures).",
+				SeedSolver.LOW_BITS_NEEDED, SeedSolver.BITS_NEEDED),
+			"Java's random generator makes similar seeds give similar results, so structure bits overlap. Measured median 48-bit"
+				+ " candidates: about 10,000 with 5 structures, 1,250 with 6, 500 with 8. Treasure overlaps much less:"
+				+ " 3 structures plus 3 treasures leaves about 30. Fewer candidates means a faster step 3.",
+			"Step 3 tries the 65,536 possible top 16 bits against the server's SHA-256 hashed seed, which leaves one seed.",
+		};
+		for (String line : lines) {
+			source.sendFeedback(Component.literal(line));
+		}
+
+		Map<SeedSolver.StructureType, Integer> counts = new EnumMap<>(SeedSolver.StructureType.class);
+		for (Observation observation : OBSERVATIONS) {
+			counts.merge(observation.type(), 1, Integer::sum);
+		}
+		source.sendFeedback(Component.literal("Found so far:").withStyle(ChatFormatting.GOLD));
+		for (SeedSolver.StructureType type : SeedSolver.StructureType.values()) {
+			int count = counts.getOrDefault(type, 0);
+			source.sendFeedback(Component.literal(String.format(Locale.ROOT, "  %s: %d x %.1f bits = %.1f bits",
+				type.displayName, count, type.bits(), count * type.bits())));
+		}
+
+		SeedSolver.Information info = information();
+		source.sendFeedback(Component.literal("Total: " + progress()).withStyle(ChatFormatting.GOLD));
+		if (foundSeed != null) {
+			source.sendFeedback(Component.literal("Seed found: ").append(copyable(Long.toString(foundSeed))));
+		} else if (info.isEnough()) {
+			source.sendFeedback(Component.literal(solving ? "Enough data, cracking now." : "Enough data. Use /seedcracker crack to try again."));
+		} else {
+			int missingLow = Math.max(0, SeedSolver.LOW_BITS_NEEDED - info.lowBits());
+			double missingBits = Math.max(0, SeedSolver.BITS_NEEDED - info.bits());
+			int spreadForLow = (int) Math.ceil(missingLow / 6.0);
+			int spreadForBits = (int) Math.ceil(missingBits / SeedSolver.StructureType.IGLOO.bits());
+			int treasuresForBits = (int) Math.ceil(missingBits / SeedSolver.StructureType.BURIED_TREASURE.bits());
+			String need = spreadForLow > 0
+				? String.format(Locale.ROOT, "Still need %d more spread structure%s for the low bits", spreadForLow, spreadForLow == 1 ? "" : "s")
+				: String.format(Locale.ROOT, "Still need %.1f more bits: %d more spread structure%s or %d treasure%s",
+					missingBits, spreadForBits, spreadForBits == 1 ? "" : "s", treasuresForBits, treasuresForBits == 1 ? "" : "s");
+			source.sendFeedback(Component.literal(need + "."));
+		}
+	}
+
+	private static com.mojang.brigadier.builder.LiteralArgumentBuilder<FabricClientCommandSource> commandTree(String name) {
+		return literal(name)
 			.executes(context -> {
 				FabricClientCommandSource source = context.getSource();
 				if (foundSeed != null) {
 					source.sendFeedback(Component.literal("Seed: ").append(copyable(Long.toString(foundSeed))));
 				}
-				source.sendFeedback(Component.literal(String.format("%d structures found (%d needed, more is faster)%s",
-					OBSERVATIONS.size(), SeedSolver.MIN_OBSERVATIONS, solving ? ", cracking now" : "")));
+				source.sendFeedback(Component.literal(String.format("%d found (%s)%s. /%s info explains the numbers.",
+					OBSERVATIONS.size(), progress(), solving ? ", cracking now" : "", name)));
 				int index = 1;
 				for (Observation observation : OBSERVATIONS) {
 					source.sendFeedback(Component.literal(String.format("  %d. %s at chunk %d, %d (block %d, %d)", index++,
@@ -184,9 +255,13 @@ public final class SeedCrackerClient implements ClientModInitializer {
 				}
 				return Command.SINGLE_SUCCESS;
 			})
+			.then(literal("info").executes(context -> {
+				sendInfo(context.getSource());
+				return Command.SINGLE_SUCCESS;
+			}))
 			.then(literal("crack").executes(context -> {
-				if (OBSERVATIONS.size() < SeedSolver.MIN_OBSERVATIONS) {
-					context.getSource().sendError(Component.literal("Need at least " + SeedSolver.MIN_OBSERVATIONS + " structures."));
+				if (!information().isEnough()) {
+					context.getSource().sendError(Component.literal("Not enough data yet (" + progress() + "). See /" + name + " info."));
 					return 0;
 				}
 				foundSeed = null;
@@ -208,11 +283,12 @@ public final class SeedCrackerClient implements ClientModInitializer {
 				reset();
 				context.getSource().sendFeedback(Component.literal("Cleared all structures and the found seed."));
 				return Command.SINGLE_SUCCESS;
-			})));
+			}));
 	}
 
 	private static void reset() {
 		OBSERVATIONS.clear();
+		StructureDetector.reset();
 		foundSeed = null;
 		solveAgain = false;
 	}
