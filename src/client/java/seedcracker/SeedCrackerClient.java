@@ -18,12 +18,14 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.LongConsumer;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.loader.api.entrypoint.EntrypointContainer;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ServerData;
@@ -141,6 +143,7 @@ public final class SeedCrackerClient implements ClientModInitializer {
 			foundSeed = seed;
 			message(Component.literal(String.format("Seed found in %.1fs: ", seconds)).append(copyable(Long.toString(seed))));
 			saveSeed(seed);
+			notifyListeners(seed);
 		} else if (result.worldSeeds().length > 1) {
 			MutableComponent text = Component.literal(result.worldSeeds().length + " seeds fit. Visit more structures to narrow it down: ");
 			for (long seed : result.worldSeeds()) {
@@ -229,6 +232,21 @@ public final class SeedCrackerClient implements ClientModInitializer {
 				.append(text));
 		}
 		LOGGER.info(text.getString());
+	}
+
+	/**
+	 * Other mods can receive the seed by declaring a "seedcracker:seed_found" entrypoint that
+	 * implements java.util.function.LongConsumer. It is called on the client thread.
+	 */
+	private static void notifyListeners(long seed) {
+		for (EntrypointContainer<LongConsumer> listener
+			: FabricLoader.getInstance().getEntrypointContainers("seedcracker:seed_found", LongConsumer.class)) {
+			try {
+				listener.getEntrypoint().accept(seed);
+			} catch (RuntimeException e) {
+				LOGGER.warn("{} failed to take the seed", listener.getProvider().getMetadata().getId(), e);
+			}
+		}
 	}
 
 	/** Keeps a record per server in config/seedcracker-seeds.txt, so it isn't lost with the chat. */

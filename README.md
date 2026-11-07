@@ -11,6 +11,9 @@ chunk in chat. Once it has 5, it starts cracking in the background. The seed app
 
 5 structures usually works. 6 or more is faster and more reliable.
 
+If Structure Map is installed, the seed is handed to it automatically. Any mod can receive it by
+declaring a `seedcracker:seed_found` entrypoint that implements `java.util.function.LongConsumer`.
+
 | Command | Effect |
 | --- | --- |
 | `/seedcrack` | Show the seed and the structures found so far |
