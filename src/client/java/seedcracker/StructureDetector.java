@@ -52,6 +52,8 @@ final class StructureDetector {
 
 	static void reset() {
 		PENDING_IGLOOS.clear();
+		TemplateRecognizer.reset();
+		EndPillars.reset();
 	}
 
 	static List<Observation> scan(Level level, LevelChunk chunk) {
@@ -59,12 +61,14 @@ final class StructureDetector {
 		boolean pottedRedMushroom = false, cauldron = false, sprucePlanks = false;
 		boolean pyramidTrap = false, treasure = false;
 		List<BlockPos> furnaces = new ArrayList<>();
+		List<BlockPos> anchors = new ArrayList<>();
 		ChunkPos pos = chunk.getPos();
+		boolean overworld = level.dimension() == Level.OVERWORLD;
 
 		LevelChunkSection[] sections = chunk.getSections();
 		for (int index = 0; index < sections.length; index++) {
 			LevelChunkSection section = sections[index];
-			if (section.hasOnlyAir() || !section.maybeHas(StructureDetector::isInteresting)) {
+			if (section.hasOnlyAir() || !section.maybeHas(state -> isInteresting(state) || TemplateRecognizer.isAnchor(state.getBlock()))) {
 				continue;
 			}
 			int sectionMinY = SectionPos.sectionToBlockCoord(chunk.getSectionYFromSectionIndex(index));
@@ -72,10 +76,13 @@ final class StructureDetector {
 				for (int z = 0; z < 16; z++) {
 					for (int x = 0; x < 16; x++) {
 						BlockState state = section.getBlockState(x, y, z);
-						if (!isInteresting(state)) {
+						int blockY = sectionMinY + y;
+						if (TemplateRecognizer.isAnchor(state.getBlock())) {
+							anchors.add(pos.getBlockAt(x, blockY, z));
+						}
+						if (!overworld || !isInteresting(state)) {
 							continue;
 						}
-						int blockY = sectionMinY + y;
 						if (state.is(Blocks.STICKY_PISTON)) stickyPiston = true;
 						else if (state.is(Blocks.TRIPWIRE_HOOK)) tripwireHook = true;
 						else if (state.is(Blocks.MOSSY_COBBLESTONE)) mossyCobblestone = true;
@@ -105,8 +112,16 @@ final class StructureDetector {
 			found.add(new Observation(StructureType.BURIED_TREASURE, pos.x(), pos.z()));
 		}
 
+		found.addAll(TemplateRecognizer.check(level, anchors));
+		if (level.dimension() == Level.END) {
+			Observation pillars = EndPillars.check(level);
+			if (pillars != null) {
+				found.add(pillars);
+			}
+		}
+
 		PENDING_IGLOOS.addAll(furnaces);
-		for (Iterator<BlockPos> it = PENDING_IGLOOS.iterator(); it.hasNext(); ) {
+		for (Iterator<BlockPos> it = PENDING_IGLOOS.iterator(); overworld && it.hasNext(); ) {
 			IglooCheck check = checkIgloo(level, it.next());
 			if (check != IglooCheck.WAITING) {
 				it.remove();

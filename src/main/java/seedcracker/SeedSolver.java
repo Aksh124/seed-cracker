@@ -24,6 +24,12 @@ import java.util.stream.LongStream;
  *   <li><b>Buried treasure</b>: every chunk has a 1% chance, decided by nextFloat() &lt; 0.01 from
  *       an RNG seeded with the chunk position. Finding one is log2(100) = 6.64 bits, all of them
  *       on the upper part of the state.</li>
+ *   <li><b>Other spread structures</b>: villages, ruined portals and ancient cities work like the
+ *       temples with other spacings. Mansions and End cities use a triangular spread, the average
+ *       of two rolls per axis. Only villages add any low bits.</li>
+ *   <li><b>End pillars</b>: Random(seed).nextLong() &amp; 65535 picks their order. That is bits
+ *       16-31 of the RNG's second step, which depend only on the seed's low 32 bits, so with
+ *       them the search tries 2^32 low values, then 2^16 for the rest, and needs no low bits.</li>
  * </ul>
  *
  * <ol>
@@ -41,15 +47,28 @@ public final class SeedSolver {
 	public enum Kind {
 		/** One per region of spacing x spacing chunks, at a random offset. */
 		SPREAD,
+		/** Like SPREAD, but each offset is the average of two rolls, so it clusters in the middle. */
+		TRIANGULAR,
 		/** Each chunk independently, with a fixed chance. */
-		CHANCE
+		CHANCE,
+		/** The End's ten obsidian pillars: their order is 16 bits of Random(seed).nextLong(). */
+		PILLARS
 	}
 
+	/** Share codes store these by position, so new types go at the end. */
 	public enum StructureType {
 		DESERT_PYRAMID("desert pyramid", 32, 8, 14357617),
 		JUNGLE_TEMPLE("jungle temple", 32, 8, 14357619),
 		SWAMP_HUT("swamp hut", 32, 8, 14357620),
 		IGLOO("igloo", 32, 8, 14357618),
+		VILLAGE("village", 34, 8, 10387312),
+		RUINED_PORTAL("ruined portal", 40, 15, 34222645),
+		/** nextInt(16) uses the top bits of the RNG, so ancient cities say nothing about the low bits. */
+		ANCIENT_CITY("ancient city", 24, 8, 20083232),
+		WOODLAND_MANSION("woodland mansion", Kind.TRIANGULAR, 80, 20, 10387319),
+		END_CITY("End city", Kind.TRIANGULAR, 20, 11, 10387313),
+		/** The pillar order, stored in the observation's chunkX. */
+		END_PILLARS("End pillars", Kind.PILLARS, 1, 0, 0),
 		/** Vanilla's "legacy_type_2" frequency check: a fixed salt and a 1% chance per chunk. */
 		BURIED_TREASURE("buried treasure", 10387320, 0.01f);
 
@@ -61,8 +80,12 @@ public final class SeedSolver {
 		public final float chance;
 
 		StructureType(String displayName, int spacing, int separation, int salt) {
+			this(displayName, Kind.SPREAD, spacing, separation, salt);
+		}
+
+		StructureType(String displayName, Kind kind, int spacing, int separation, int salt) {
 			this.displayName = displayName;
-			this.kind = Kind.SPREAD;
+			this.kind = kind;
 			this.spacing = spacing;
 			this.separation = separation;
 			this.salt = salt;
@@ -84,12 +107,17 @@ public final class SeedSolver {
 
 		/** Information one observation of this type gives about the 48-bit structure seed. */
 		public double bits() {
-			return kind == Kind.SPREAD ? 2 * log2(bound()) : -log2(chance);
+			return switch (kind) {
+				case SPREAD -> 2 * log2(bound());
+				case TRIANGULAR -> 2 * triangularEntropy(bound());
+				case CHANCE -> -log2(chance);
+				case PILLARS -> 16;
+			};
 		}
 
 		/** How many of those bits fall on the seed's lowest 20 bits (used by the first search). */
 		public int lowBits() {
-			return kind == Kind.SPREAD ? 2 * Math.min(Integer.numberOfTrailingZeros(bound()), LOW_BITS - 17) : 0;
+			return 2 * lowBitsPerAxis(kind, bound());
 		}
 	}
 
@@ -101,9 +129,9 @@ public final class SeedSolver {
 	 * @param bits total information, before the LCG overlap that makes the real figure lower
 	 * @param lowBits information on the lowest 20 bits, which the first search needs
 	 */
-	public record Information(double bits, int lowBits) {
+	public record Information(double bits, int lowBits, boolean pillars) {
 		public boolean isEnough() {
-			return bits >= BITS_NEEDED && lowBits >= LOW_BITS_NEEDED;
+			return bits >= BITS_NEEDED && (lowBits >= LOW_BITS_NEEDED || pillars);
 		}
 	}
 
@@ -167,6 +195,30 @@ public final class SeedSolver {
 	/** An observation turned into the RNG seed offset and what the RNG must produce. */
 	private record Constraint(Kind kind, long seedOffset, int bound, int offsetX, int offsetZ, float chance) {}
 
+	/** Bits of each offset that fall on the RNG's low bits, which the first search uses. */
+	private static int lowBitsPerAxis(Kind kind, int bound) {
+		// nextInt of a power of two takes the top bits instead, and a triangular offset mixes two rolls.
+		if (kind != Kind.SPREAD || (bound & -bound) == bound) {
+			return 0;
+		}
+		return Math.min(Integer.numberOfTrailingZeros(bound), LOW_BITS - 17);
+	}
+
+	/** Entropy of (nextInt(bound) + nextInt(bound)) / 2. */
+	private static double triangularEntropy(int bound) {
+		double[] chances = new double[bound];
+		for (int a = 0; a < bound; a++) {
+			for (int b = 0; b < bound; b++) {
+				chances[(a + b) / 2] += 1.0 / ((double) bound * bound);
+			}
+		}
+		double entropy = 0;
+		for (double p : chances) {
+			entropy -= p > 0 ? p * log2(p) : 0;
+		}
+		return entropy;
+	}
+
 	private SeedSolver() {}
 
 	private static double log2(double value) {
@@ -176,11 +228,19 @@ public final class SeedSolver {
 	public static Information information(List<Observation> observations) {
 		double bits = 0;
 		int lowBits = 0;
+		boolean pillars = false;
 		for (Observation observation : observations) {
+			if (observation.type() == StructureType.END_PILLARS) {
+				// Seeing them twice says nothing new.
+				if (pillars) {
+					continue;
+				}
+				pillars = true;
+			}
 			bits += observation.type().bits();
 			lowBits += observation.type().lowBits();
 		}
-		return new Information(bits, Math.min(lowBits, LOW_BITS));
+		return new Information(bits, Math.min(lowBits, LOW_BITS), pillars);
 	}
 
 	/** False if the chunk cannot hold this structure type at all. */
@@ -229,8 +289,13 @@ public final class SeedSolver {
 			}
 			constraints.add(constraint);
 		}
-		// Spread checks rule out more per call, so they go first in the 2^28 loop.
+		// Spread checks rule out more per call, so they go first in the inner loop.
 		constraints.sort(Comparator.comparing(Constraint::kind));
+
+		Constraint pillars = constraints.stream().filter(c -> c.kind() == Kind.PILLARS).findFirst().orElse(null);
+		if (pillars != null) {
+			return structureSeedsFromPillars(pillars.offsetX(), constraints);
+		}
 
 		long[] lowHalves = LongStream.range(0, 1L << LOW_BITS)
 			.parallel()
@@ -248,6 +313,34 @@ public final class SeedSolver {
 		return found.stream().flatMapToLong(Arrays::stream).sorted().toArray();
 	}
 
+	/**
+	 * With the End pillars, the low 32 bits come first: the pillar order is bits 16-31 of the
+	 * RNG's second step, which depends only on the seed's low 32 bits. Trying all 2^32 leaves about
+	 * 2^16, and each needs only the 2^16 values of the remaining bits. No low-bit structures needed.
+	 */
+	private static long[] structureSeedsFromPillars(int pillarOrder, List<Constraint> constraints) {
+		long[] lowHalves = LongStream.range(0, 1L << 32)
+			.parallel()
+			.filter(low -> pillarOrder(low) == pillarOrder && matchesLowBits(low & LOW_MASK, constraints))
+			.toArray();
+		return Arrays.stream(lowHalves)
+			.parallel()
+			.flatMap(low -> LongStream.range(0, 1L << 16)
+				.map(high -> (high << 32) | low)
+				.filter(seed -> matchesAll(seed, constraints)))
+			.sorted()
+			.toArray();
+	}
+
+	/** RandomSource.createThreadLocalInstance(seed).nextLong() & 65535: picks the End pillars' order. */
+	public static int pillarOrder(long seed) {
+		long state = (seed ^ MULTIPLIER) & MASK_48;
+		state = (state * MULTIPLIER + ADDEND) & MASK_48;
+		state = (state * MULTIPLIER + ADDEND) & MASK_48;
+		// nextLong() is (next(32) << 32) + next(32); its low 16 bits are the second call's.
+		return (int) (state >>> 16) & 0xFFFF;
+	}
+
 	/** Full 64-bit seeds with these lower 48 bits whose hash matches the one the server sent. */
 	public static long[] worldSeeds(long structureSeed, long hashedSeed, LongUnaryOperator seedHash) {
 		return LongStream.range(0, 1L << 16)
@@ -257,6 +350,19 @@ public final class SeedSolver {
 			.toArray();
 	}
 
+	/** Whether these lower 48 bits fit every observation. For tests. */
+	static boolean matches(long structureSeed, List<Observation> observations) {
+		List<Constraint> constraints = new ArrayList<>();
+		for (Observation observation : observations) {
+			Constraint constraint = toConstraint(observation);
+			if (constraint == null) {
+				return false;
+			}
+			constraints.add(constraint);
+		}
+		return matchesAll(structureSeed, constraints);
+	}
+
 	/** Whether vanilla's 1% check passes for this chunk, given the lower 48 bits. For tests. */
 	static boolean passesChance(long structureSeed, StructureType type, int chunkX, int chunkZ) {
 		return matchesAll(structureSeed, List.of(toConstraint(new Observation(type, chunkX, chunkZ))));
@@ -264,6 +370,9 @@ public final class SeedSolver {
 
 	private static Constraint toConstraint(Observation observation) {
 		StructureType type = observation.type();
+		if (type.kind == Kind.PILLARS) {
+			return new Constraint(Kind.PILLARS, 0, 1, observation.chunkX(), 0, 1f);
+		}
 		if (type.kind == Kind.CHANCE) {
 			long seedOffset = observation.chunkX() * REGION_X_MULTIPLIER + observation.chunkZ() * REGION_Z_MULTIPLIER + type.salt;
 			return new Constraint(Kind.CHANCE, seedOffset, 1, 0, 0, type.chance);
@@ -276,15 +385,12 @@ public final class SeedSolver {
 			return null;
 		}
 		long seedOffset = regionX * REGION_X_MULTIPLIER + regionZ * REGION_Z_MULTIPLIER + type.salt;
-		return new Constraint(Kind.SPREAD, seedOffset, type.bound(), offsetX, offsetZ, 1f);
+		return new Constraint(type.kind, seedOffset, type.bound(), offsetX, offsetZ, 1f);
 	}
 
 	private static boolean matchesLowBits(long low, List<Constraint> constraints) {
 		for (Constraint c : constraints) {
-			if (c.kind() != Kind.SPREAD) {
-				continue;
-			}
-			int knownBits = Math.min(Integer.numberOfTrailingZeros(c.bound()), LOW_BITS - 17);
+			int knownBits = lowBitsPerAxis(c.kind(), c.bound());
 			if (knownBits == 0) {
 				continue;
 			}
@@ -304,11 +410,31 @@ public final class SeedSolver {
 
 	private static boolean matchesAll(long seed, List<Constraint> constraints) {
 		for (Constraint c : constraints) {
+			if (c.kind() == Kind.PILLARS) {
+				if (pillarOrder(seed) != c.offsetX()) {
+					return false;
+				}
+				continue;
+			}
 			long state = ((seed + c.seedOffset()) ^ MULTIPLIER) & MASK_48;
 			if (c.kind() == Kind.CHANCE) {
 				// nextFloat(): next(24) / 2^24.
 				state = (state * MULTIPLIER + ADDEND) & MASK_48;
 				if (!((int) (state >>> 24) * FLOAT_UNIT < c.chance())) {
+					return false;
+				}
+				continue;
+			}
+			if (c.kind() == Kind.TRIANGULAR) {
+				// Each axis is the average of two rolls, x first.
+				long a = nextInt(state, c.bound());
+				long b = nextInt(a & MASK_48, c.bound());
+				if ((int) (((a >>> 48) + (b >>> 48)) / 2) != c.offsetX()) {
+					return false;
+				}
+				a = nextInt(b & MASK_48, c.bound());
+				b = nextInt(a & MASK_48, c.bound());
+				if ((int) (((a >>> 48) + (b >>> 48)) / 2) != c.offsetZ()) {
 					return false;
 				}
 				continue;

@@ -5,7 +5,7 @@
 	"name": "Seed Cracker game tests",
 	"environment": "client",
 	"entrypoints": {
-		"fabric-client-gametest": ["seedcracker.test.SeedCrackerGameTest", "seedcracker.test.IglooTreasureGameTest"]
+		"fabric-client-gametest": ["seedcracker.test.NewStructuresGameTest", "seedcracker.test.SeedCrackerGameTest", "seedcracker.test.IglooTreasureGameTest"]
 	},
 	"depends": {
 		"seedcracker": "*"

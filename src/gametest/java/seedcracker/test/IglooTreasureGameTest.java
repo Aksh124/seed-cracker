@@ -36,6 +36,8 @@ public class IglooTreasureGameTest implements FabricClientGameTest {
 
 	@Override
 	public void runTest(ClientGameTestContext context) {
+		// Silent: the test framework turns the volume back up when it starts.
+		context.runOnClient(mc -> mc.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(0.0));
 		try (TestSingleplayerContext world = context.worldBuilder()
 			.setUseConsistentSettings(false)
 			.adjustSettings(settings -> settings.setSeed(Long.toString(SEED)))

@@ -14,6 +14,7 @@ import net.minecraft.SharedConstants;
 import net.minecraft.core.Vec3i;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
 import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadType;
@@ -42,8 +43,8 @@ class SeedSolverTest {
 
 	/** Where vanilla puts the structure of this type in the given region. */
 	private static Observation vanilla(long worldSeed, StructureType type, int regionX, int regionZ) {
-		RandomSpreadStructurePlacement placement =
-			new RandomSpreadStructurePlacement(type.spacing, type.separation, RandomSpreadType.LINEAR, type.salt);
+		RandomSpreadType spread = type.kind == SeedSolver.Kind.TRIANGULAR ? RandomSpreadType.TRIANGULAR : RandomSpreadType.LINEAR;
+		RandomSpreadStructurePlacement placement = new RandomSpreadStructurePlacement(type.spacing, type.separation, spread, type.salt);
 		ChunkPos chunk = placement.getPotentialStructureChunk(worldSeed, regionX * type.spacing, regionZ * type.spacing);
 		return new Observation(type, chunk.x(), chunk.z());
 	}
@@ -74,6 +75,94 @@ class SeedSolverTest {
 
 	private static boolean contains(long[] values, long value) {
 		return Arrays.stream(values).anyMatch(v -> v == value);
+	}
+
+	/** The End pillars' order, the way vanilla's EndSpikeFeature picks it. */
+	private static Observation pillars(long worldSeed) {
+		int order = (int) (RandomSource.createThreadLocalInstance(worldSeed).nextLong() & 65535L);
+		return new Observation(StructureType.END_PILLARS, order, 0);
+	}
+
+	/** One of each of these types, each in a different random region. */
+	private static List<Observation> some(long worldSeed, long layoutSeed, StructureType... types) {
+		Random layout = new Random(layoutSeed);
+		List<Observation> found = new ArrayList<>();
+		for (StructureType type : types) {
+			found.add(vanilla(worldSeed, type, layout.nextInt(30) - 15, layout.nextInt(30) - 15));
+		}
+		return found;
+	}
+
+	@Test
+	void pillarOrderMatchesVanilla() {
+		Random random = new Random(12);
+		for (int i = 0; i < 10_000; i++) {
+			long seed = random.nextLong();
+			assertEquals(pillars(seed).chunkX(), SeedSolver.pillarOrder(seed & MASK_48));
+			// Only the low 32 bits matter, which the pillar search relies on.
+			assertEquals(SeedSolver.pillarOrder(seed), SeedSolver.pillarOrder(seed & 0xFFFF_FFFFL));
+		}
+	}
+
+	@Test
+	void newTypesFitVanillaPlacement() {
+		long worldSeed = 77_123_456_789L;
+		for (StructureType type : List.of(StructureType.VILLAGE, StructureType.RUINED_PORTAL, StructureType.ANCIENT_CITY,
+			StructureType.WOODLAND_MANSION, StructureType.END_CITY)) {
+			for (int region = -5; region <= 5; region++) {
+				Observation observation = vanilla(worldSeed, type, region, -region * 2);
+				assertTrue(SeedSolver.isPossible(observation), observation.toString());
+				// The real seed passes the solver's check for it, with no other observations.
+				assertTrue(SeedSolver.matches(worldSeed & MASK_48, List.of(observation)), observation.toString());
+				Observation moved = new Observation(type, observation.chunkX() + 1, observation.chunkZ());
+				if (SeedSolver.isPossible(moved)) {
+					assertFalse(SeedSolver.matches(worldSeed & MASK_48, List.of(moved)), moved.toString());
+				}
+			}
+		}
+	}
+
+	@Test
+	void pillarsAndOnlyNewStructures() {
+		long worldSeed = -2_718_281_828_459_045L;
+		List<Observation> observations = new ArrayList<>(List.of(pillars(worldSeed)));
+		observations.addAll(some(worldSeed, 20, StructureType.RUINED_PORTAL, StructureType.RUINED_PORTAL,
+			StructureType.END_CITY, StructureType.WOODLAND_MANSION));
+		SeedSolver.Information info = SeedSolver.information(observations);
+		assertEquals(0, info.lowBits());
+		assertTrue(info.isEnough(), info.toString());
+		SeedSolver.Result result = SeedSolver.crack(observations, SeedSolver.hashSeed(worldSeed), SeedSolver::hashSeed);
+		assertArrayEquals(new long[] {worldSeed}, result.worldSeeds());
+	}
+
+	@Test
+	void pillarsPortalsAndEndCities() {
+		long worldSeed = 8_675_309L;
+		List<Observation> observations = new ArrayList<>(List.of(pillars(worldSeed)));
+		observations.addAll(some(worldSeed, 21, StructureType.RUINED_PORTAL, StructureType.RUINED_PORTAL,
+			StructureType.RUINED_PORTAL, StructureType.END_CITY, StructureType.END_CITY));
+		SeedSolver.Result result = SeedSolver.crack(observations, SeedSolver.hashSeed(worldSeed), SeedSolver::hashSeed);
+		assertArrayEquals(new long[] {worldSeed}, result.worldSeeds());
+	}
+
+	@Test
+	void templesVillagesAndAnAncientCity() {
+		long worldSeed = 4_444_555_566_667_777L;
+		List<Observation> observations = some(worldSeed, 22, StructureType.DESERT_PYRAMID, StructureType.SWAMP_HUT,
+			StructureType.IGLOO, StructureType.VILLAGE, StructureType.VILLAGE, StructureType.ANCIENT_CITY);
+		SeedSolver.Information info = SeedSolver.information(observations);
+		assertEquals(20, info.lowBits());
+		assertFalse(info.pillars());
+		SeedSolver.Result result = SeedSolver.crack(observations, SeedSolver.hashSeed(worldSeed), SeedSolver::hashSeed);
+		assertArrayEquals(new long[] {worldSeed}, result.worldSeeds());
+	}
+
+	@Test
+	void portalsAloneAreNotEnough() {
+		// Lots of bits, but none on the low 20 and no pillars, so the search can't start.
+		List<Observation> portals = some(5, 23, StructureType.RUINED_PORTAL, StructureType.RUINED_PORTAL,
+			StructureType.RUINED_PORTAL, StructureType.RUINED_PORTAL, StructureType.RUINED_PORTAL, StructureType.RUINED_PORTAL);
+		assertFalse(SeedSolver.information(portals).isEnough());
 	}
 
 	@Test
@@ -114,6 +203,17 @@ class SeedSolverTest {
 		assertEquals(6, StructureType.IGLOO.lowBits());
 		assertEquals(6.64, StructureType.BURIED_TREASURE.bits(), 0.01);
 		assertEquals(0, StructureType.BURIED_TREASURE.lowBits());
+		assertEquals(9.40, StructureType.VILLAGE.bits(), 0.01);
+		assertEquals(2, StructureType.VILLAGE.lowBits());
+		assertEquals(9.29, StructureType.RUINED_PORTAL.bits(), 0.01);
+		assertEquals(0, StructureType.RUINED_PORTAL.lowBits());
+		assertEquals(8.0, StructureType.ANCIENT_CITY.bits(), 0.01);
+		assertEquals(0, StructureType.ANCIENT_CITY.lowBits());
+		assertEquals(16.0, StructureType.END_PILLARS.bits(), 0.01);
+		// Triangular spreads cluster in the middle, so they say a bit less than a flat spread would.
+		assertTrue(StructureType.WOODLAND_MANSION.bits() < 2 * Math.log(60) / Math.log(2));
+		assertTrue(StructureType.END_CITY.bits() < 2 * Math.log(9) / Math.log(2));
+		System.out.printf("mansion %.2f bits, End city %.2f bits%n", StructureType.WOODLAND_MANSION.bits(), StructureType.END_CITY.bits());
 
 		assertFalse(SeedSolver.information(observe(1, 4, 1)).isEnough());
 		assertTrue(SeedSolver.information(observe(1, 5, 1)).isEnough());

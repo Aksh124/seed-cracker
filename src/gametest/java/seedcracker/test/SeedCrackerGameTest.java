@@ -41,6 +41,8 @@ public class SeedCrackerGameTest implements FabricClientGameTest {
 
 	@Override
 	public void runTest(ClientGameTestContext context) {
+		// Silent: the test framework turns the volume back up when it starts.
+		context.runOnClient(mc -> mc.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(0.0));
 		try (TestSingleplayerContext world = context.worldBuilder()
 			.setUseConsistentSettings(false)
 			.adjustSettings(settings -> settings.setSeed(Long.toString(SEED)))
@@ -72,8 +74,49 @@ public class SeedCrackerGameTest implements FabricClientGameTest {
 				() -> "no seed after visiting " + SeedCrackerClient.observations());
 			check(SeedCrackerClient.foundSeed() == SEED, "cracked " + SeedCrackerClient.foundSeed() + " but the seed is " + SEED);
 			log("cracked the seed " + SEED + " from " + SeedCrackerClient.observations().size() + " structures");
+
+			// Sharing the seed: one short code, and importing it gives the seed straight away.
+			String code = context.computeOnClient(mc -> SeedCrackerClient.shareCode().encode());
+			context.runOnClient(mc -> mc.player.connection.sendCommand("seedcracker clear"));
+			context.waitTicks(2);
+			context.runOnClient(mc -> mc.player.connection.sendCommand("seedcracker import " + code));
+			context.waitTicks(2);
+			check(Long.valueOf(SEED).equals(SeedCrackerClient.foundSeed()), "importing the seed code didn't give the seed");
+			log("shared the seed as " + code + " and imported it");
+
+			savedProgress(context);
 			context.takeScreenshot("seedcracker-found");
 		}
+	}
+
+	/** Leaving and coming back keeps the seed and finds; a reset world's leftovers are thrown away. */
+	private static void savedProgress(ClientGameTestContext context) {
+		String key = context.computeOnClient(seedcracker.Progress::key);
+		java.nio.file.Path file = seedcracker.Progress.file(key);
+		check(java.nio.file.Files.exists(file), "nothing saved at " + file);
+		List<Observation> before = SeedCrackerClient.observations();
+
+		context.runOnClient(mc -> SeedCrackerClient.rejoinForTest());
+		check(Long.valueOf(SEED).equals(SeedCrackerClient.foundSeed()) && SeedCrackerClient.observations().equals(before),
+			"rejoining lost progress: " + SeedCrackerClient.foundSeed() + " " + SeedCrackerClient.observations());
+		log("rejoined: seed and " + before.size() + " finds came back from " + file.getFileName());
+
+		// The same server with a different world: leftovers from before the reset are dropped.
+		seedcracker.Progress.save(key, 12345L, 678L, before);
+		context.runOnClient(mc -> SeedCrackerClient.rejoinForTest());
+		check(SeedCrackerClient.foundSeed() == null && SeedCrackerClient.observations().isEmpty() && !java.nio.file.Files.exists(file),
+			"a reset world's progress was used");
+		log("a reset world's old progress was thrown away");
+
+		// /seedcracker clear removes the save too.
+		seedcracker.Progress.save(key, context.computeOnClient(mc ->
+			((BiomeManagerAccess) mc.level.getBiomeManager()).seedcracker$hashedSeed()), SEED, before);
+		context.runOnClient(mc -> SeedCrackerClient.rejoinForTest());
+		check(Long.valueOf(SEED).equals(SeedCrackerClient.foundSeed()), "saved seed not loaded");
+		context.runOnClient(mc -> mc.player.connection.sendCommand("seedcracker clear"));
+		context.waitTicks(2);
+		check(!java.nio.file.Files.exists(file) && SeedCrackerClient.foundSeed() == null, "/seedcracker clear kept the save");
+		log("/seedcracker clear deleted the save");
 	}
 
 	/** Start chunks of nearby structures, found with the same check /locate uses. */
